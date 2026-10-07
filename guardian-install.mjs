@@ -49,13 +49,55 @@ function banner(title) {
   console.log(`\n${green('🛡  Guardian')} ${dim('·')} ${bold(title)}\n`);
 }
 
+const hint = (e) => /EACCES|EPERM|Access is denied|requested operation requires elevation/i.test(String(e.stderr || e.message))
+  ? 'permission denied. Run as Administrator (Windows) or with sudo.'
+  : String(e.message).split('\n')[0];
+
+/** Show "… label" while fn runs, then swap it for a ✓ (or a ✗ with a fix hint). */
+function step(label, fn, doneLabel = label) {
+  const clear = () => tty && process.stdout.write('\r\x1b[2K');
+  if (tty) process.stdout.write(`  ${dim('…')} ${dim(label)}`);
+  try { fn(); } catch (e) { clear(); fail(`${label}: ${hint(e)}`); return false; }
+  clear(); ok(doneLabel); return true;
+}
+
+function box(lines, color = green) {
+  const w = Math.max(...lines.map((l) => l.length));
+  console.log(`\n  ${color('┌' + '─'.repeat(w + 2) + '┐')}`);
+  for (const l of lines) console.log(`  ${color('│')} ${l.padEnd(w)} ${color('│')}`);
+  console.log(`  ${color('└' + '─'.repeat(w + 2) + '┘')}`);
+}
+
+async function ask(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const a = (await rl.question(question)).trim().toLowerCase();
+  rl.close();
+  return a;
+}
+
 async function confirm(question, yes) {
   if (yes || !tty) return true;
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const a = (await rl.question(`${question} ${dim('[Y/n]')} `)).trim().toLowerCase();
-  rl.close();
+  const a = await ask(`${question} ${dim('[Y/n]')} `);
   return a === '' || a === 'y' || a === 'yes';
 }
+
+async function menu() {
+  console.log(`  ${bold('1)')} Install Guardian`);
+  console.log(`  ${bold('2)')} Uninstall`);
+  console.log(`  ${bold('3)')} Check status`);
+  console.log(`  ${bold('q)')} Quit\n`);
+  const a = await ask('  Choose: ');
+  return { 1: 'install', 2: 'uninstall', 3: 'status' }[a] || null;
+}
+
+// Which supported browsers are on this computer (policy is set for all of them anyway,
+// so one installed later is protected too).
+const FOUND = {
+  darwin: { chrome: ['/Applications/Google Chrome.app'], chromium: ['/Applications/Chromium.app'], edge: ['/Applications/Microsoft Edge.app'], brave: ['/Applications/Brave Browser.app'] },
+  win32: { chrome: ['C:\\Program Files\\Google\\Chrome', 'C:\\Program Files (x86)\\Google\\Chrome'], edge: ['C:\\Program Files (x86)\\Microsoft\\Edge', 'C:\\Program Files\\Microsoft\\Edge'], brave: ['C:\\Program Files\\BraveSoftware'] },
+  linux: { chrome: ['/opt/google/chrome'], chromium: ['/usr/bin/chromium', '/usr/bin/chromium-browser'], edge: ['/opt/microsoft/msedge'], brave: ['/opt/brave.com/brave', '/usr/bin/brave-browser'] },
+};
+const detect = (os) => Object.entries(FOUND[os] || {}).filter(([, ps]) => ps.some(existsSync)).map(([n]) => n);
 
 // --- platform helpers --------------------------------------------------------
 const run = (cmd, args) => execFileSync(cmd, args, { stdio: 'pipe' });
@@ -77,43 +119,51 @@ function plistValue(v, pad = '') {
   return `${pad}<dict>\n${inner}\n${pad}</dict>`;
 }
 
-// --- actions -----------------------------------------------------------------
+// --- actions (each returns the browsers it configured) -----------------------
 function installWindows(id, dry) {
+  const done = [];
   for (const [name, b] of Object.entries(BROWSERS)) {
     if (!b.win) continue;
     const key = `HKLM\\SOFTWARE\\Policies\\${b.win}`;
-    for (const [k, v] of Object.entries(policyFor(b, id))) {
-      const [type, data] = typeof v === 'object' ? ['REG_SZ', JSON.stringify(v)]
-        : [ 'REG_DWORD', String(Number(v))];
-      if (!dry) run('reg', ['add', key, '/v', k, '/t', type, '/d', data, '/f']);
-    }
-    ok(`${name}: policy written to ${key}`);
+    const write = () => {
+      for (const [k, v] of Object.entries(policyFor(b, id))) {
+        const [type, data] = typeof v === 'object' ? ['REG_SZ', JSON.stringify(v)] : ['REG_DWORD', String(Number(v))];
+        if (!dry) run('reg', ['add', key, '/v', k, '/t', type, '/d', data, '/f']);
+      }
+    };
+    if (step(`Configuring ${name}`, write, `${name} → ${key}`)) done.push(name);
   }
+  return done;
 }
 function uninstallWindows(dry) {
+  const done = [];
   for (const [name, b] of Object.entries(BROWSERS)) {
     if (!b.win) continue;
     const key = `HKLM\\SOFTWARE\\Policies\\${b.win}`;
     // Delete only our values, never the whole key: an admin may have other policies there.
-    for (const k of Object.keys(policyFor(b, 'x'))) {
-      if (!dry) try { run('reg', ['delete', key, '/v', k, '/f']); } catch { /* not set */ }
-    }
-    ok(`${name}: Guardian policy removed`);
+    const del = () => { for (const k of Object.keys(policyFor(b, 'x'))) if (!dry) try { run('reg', ['delete', key, '/v', k, '/f']); } catch { /* not set */ } };
+    if (step(`Removing ${name} policy`, del, `${name} policy removed`)) done.push(name);
   }
+  return done;
 }
 
 function installLinux(id, dry, root) {
+  const done = [];
   for (const [name, b] of Object.entries(BROWSERS)) {
     const dir = join(root, b.linux);
-    if (!dry) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'guardian.json'), JSON.stringify(policyFor(b, id), null, 2)); }
-    ok(`${name}: ${join(dir, 'guardian.json')}`);
+    const write = () => { if (!dry) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'guardian.json'), JSON.stringify(policyFor(b, id), null, 2)); } };
+    if (step(`Configuring ${name}`, write, `${name} → ${join(dir, 'guardian.json')}`)) done.push(name);
   }
+  return done;
 }
 function uninstallLinux(dry, root) {
+  const done = [];
   for (const [name, b] of Object.entries(BROWSERS)) {
     const f = join(root, b.linux, 'guardian.json');
-    if (existsSync(f)) { if (!dry) rmSync(f); ok(`${name}: removed ${f}`); } else skip(`${name}: nothing to remove`);
+    if (!existsSync(f)) { skip(`${name}: nothing to remove`); continue; }
+    if (step(`Removing ${name} policy`, () => { if (!dry) rmSync(f); }, `${name} → removed ${f}`)) done.push(name);
   }
+  return done;
 }
 
 // ponytail: plistValue has no arrays; macProfileDoc writes the two array wrappers by hand.
@@ -125,14 +175,12 @@ function installMac(id, dry) {
 ${macProfileDoc(id)}
 </plist>
 `;
-  if (!dry) { writeFileSync(file, profile); run('open', [file]); }
-  ok(`profile written to ${file}`);
-  console.log(`\n  ${bold('One last step:')} System Settings → General → Device Management → Guardian → Install.`);
-  console.log(`  ${dim('Then quit and reopen your browsers.')}`);
+  const write = () => { if (!dry) { writeFileSync(file, profile); run('open', [file]); } };
+  return step('Building configuration profile', write, `profile opened: ${file}`) ? Object.keys(BROWSERS) : [];
 }
 function uninstallMac(dry) {
-  if (!dry) run('profiles', ['remove', '-identifier', PROFILE_ID]);
-  ok('profile removed (asks for your admin password)');
+  return step('Removing configuration profile', () => { if (!dry) run('profiles', ['remove', '-identifier', PROFILE_ID]); },
+    'profile removed') ? Object.keys(BROWSERS) : [];
 }
 
 // Full profile as a plist dict; the one payload's Forced values are arrays.
@@ -164,18 +212,28 @@ async function main() {
   const args = process.argv.slice(2);
   const flag = (n) => args.includes(`--${n}`);
   const val = (n) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
-  const cmd = args.find((a) => !a.startsWith('--') && a !== val('id') && a !== val('root') && a !== val('os')) || 'install';
+  const given = args.find((a) => !a.startsWith('--') && a !== val('id') && a !== val('root') && a !== val('os'));
   const id = val('id') || EXTENSION_ID;
   const dry = flag('dry-run');
   const root = val('root') || '';       // tests point Linux paths at a temp dir
   const os = val('os') || process.platform;   // --os lets tests exercise another platform's branch
 
-  banner(cmd === 'uninstall' ? 'Uninstall' : cmd === 'status' ? 'Status' : 'Install');
+  let cmd = given || 'install';
+  if (!given && tty && !flag('yes')) {      // no command typed in a terminal: show the menu
+    banner('Setup');
+    cmd = await menu();
+    if (!cmd) return console.log('\n  Bye.');
+  } else banner(cmd === 'uninstall' ? 'Uninstall' : cmd === 'status' ? 'Status' : 'Install');
 
   if (cmd === 'status') {
-    if (os === 'linux') for (const [n, b] of Object.entries(BROWSERS))
-      (existsSync(join(root, b.linux, 'guardian.json')) ? ok : skip)(`${n}: ${existsSync(join(root, b.linux, 'guardian.json')) ? 'protected' : 'not set'}`);
-    else if (os === 'darwin') console.log(`  ${run('profiles', ['list']).toString().includes(PROFILE_ID) ? green('✓ profile installed') : dim('· profile not installed')}`);
+    if (os === 'linux') for (const [n, b] of Object.entries(BROWSERS)) {
+      const on = existsSync(join(root, b.linux, 'guardian.json'));
+      (on ? ok : skip)(`${n}: ${on ? 'protected' : 'not set'}`);
+    } else if (os === 'darwin') {
+      let on = false;
+      try { on = run('profiles', ['list']).toString().includes(PROFILE_ID); } catch { /* profiles needs root on some macOS versions */ }
+      on ? ok('profile installed') : skip('profile not found (re-run with sudo for a definitive answer)');
+    }
     else console.log(`  ${dim('Open chrome://policy in each browser to confirm.')}`);
     return;
   }
@@ -185,19 +243,30 @@ async function main() {
     return fail(os === 'win32' ? 'run this from an Administrator terminal.' : `run with sudo: sudo node ${process.argv[1]} ${cmd}`);
   if (!['linux', 'darwin', 'win32'].includes(os)) return fail(`${os} is not supported`);
 
+  const found = detect(os);
   if (cmd === 'install') {
     console.log(`  Extension  ${bold(id)}`);
-    console.log(`  Will: force-install Guardian, disable Incognito/Guest/new profiles/developer mode.`);
-    console.log(`  ${dim('Child must use a standard (non-admin) account, or this can be undone.')}\n`);
+    console.log(`  Browsers   ${found.length ? found.join(', ') : dim('none found (policy is set for any you install later)')}`);
+    console.log(`  Will       force-install Guardian; disable Incognito, Guest mode, new profiles, developer mode`);
+    console.log(`  ${dim('The child must use a standard (non-admin) account, or this can be undone.')}\n`);
   }
   if (!(await confirm(cmd === 'install' ? 'Install now?' : 'Remove Guardian policies?', flag('yes')))) return console.log('  Cancelled.');
+  console.log();
 
-  if (os === 'win32') cmd === 'install' ? installWindows(id, dry) : uninstallWindows(dry);
-  else if (os === 'linux') cmd === 'install' ? installLinux(id, dry, root) : uninstallLinux(dry, root);
-  else cmd === 'install' ? installMac(id, dry) : uninstallMac(dry);
+  const install = cmd === 'install';
+  const done = os === 'win32' ? (install ? installWindows(id, dry) : uninstallWindows(dry))
+    : os === 'linux' ? (install ? installLinux(id, dry, root) : uninstallLinux(dry, root))
+    : (install ? installMac(id, dry) : uninstallMac(dry));
 
-  if (os !== 'darwin' && !process.exitCode) console.log(`\n  ${bold('Done.')} ${dim('Restart your browsers, then check chrome://policy.')}`);
-  if (dry) console.log(`  ${dim('(dry run: nothing was changed)')}`);
+  const next = os === 'darwin' && install
+    ? ['Next: System Settings → General → Device Management', '      → Guardian → Install, then restart your browsers.']
+    : ['Next: restart your browsers, then open chrome://policy.'];
+  if (process.exitCode) return box(['Some steps failed. Fix the ✗ lines above and run again.'], red);
+  box([
+    `${install ? 'Protected' : 'Removed'}: ${done.join(', ') || 'nothing'}`,
+    ...(install ? [`Found here: ${found.join(', ') || 'no supported browser'}`, ...next] : []),
+    ...(dry ? ['(dry run: nothing was changed)'] : []),
+  ]);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main().catch((e) => { fail(e.message); });
