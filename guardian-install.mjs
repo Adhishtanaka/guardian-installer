@@ -11,8 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-// ponytail: fill in after Chrome Web Store approval, or pass --id
-const EXTENSION_ID = 'REPLACE_WITH_WEB_STORE_ID';
+const EXTENSION_ID = 'ealdlhckpppdglppgliafiklbipogmmn'; // Chrome Web Store ID; --id overrides
 const UPDATE_URL = 'https://clients2.google.com/service/update2/crx';
 const PROFILE_ID = 'com.guardian.profile';
 

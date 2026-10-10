@@ -30,5 +30,5 @@ if (process.platform === 'darwin') {
   for (const b of Object.values(BROWSERS)) assert.ok(out.includes(b.mac), b.mac);
 }
 // refuses to install without a real ID
-assert.throws(() => execFileSync('node', ['guardian-install.mjs', 'install', '--yes', '--dry-run'], { stdio: 'pipe' }));
+assert.throws(() => execFileSync('node', ['guardian-install.mjs', 'install', '--yes', '--dry-run', '--id', 'REPLACE_ME'], { stdio: 'pipe' }));
 console.log('all checks passed');
